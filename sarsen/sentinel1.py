@@ -109,7 +109,9 @@ class Sentinel1SarProduct(
             self.product_urlpath, check_files_exist=True, **self.kwargs
         )
 
-        measurement_groups = [g for g in ds.attrs["subgroups"] if g.count("/") == 1]
+        with ds:
+            subgroups = ds.attrs["subgroups"]
+        measurement_groups = [g for g in subgroups if g.count("/") == 1]
         return measurement_groups
 
     @property
@@ -205,7 +207,8 @@ class Sentinel1SarProduct(
 
     @functools.cached_property
     def product_type(self) -> Any:
-        prod_type = self.measurement.attrs["product_type"]
+        with self.measurement as measurement:
+            prod_type = measurement.attrs["product_type"]
         assert isinstance(prod_type, str)
         return prod_type
 
@@ -227,9 +230,10 @@ class Sentinel1SarProduct(
     ) -> datamodel.OrbitInterpolator:
         state_vectors = self.state_vectors()
         if epoch is None:
-            azimuth_time = self.measurement.coords["azimuth_time"]
-            mid_azimuth_time_index = azimuth_time.size // 2
-            epoch = azimuth_time.values[mid_azimuth_time_index]
+            with self.measurement as measurement:
+                azimuth_time = measurement.coords["azimuth_time"]
+                mid_azimuth_time_index = azimuth_time.size // 2
+                epoch = azimuth_time.values[mid_azimuth_time_index]
         interpolator = orbit.OrbitPolyfitInterpolator.from_position(
             state_vectors, epoch=epoch, **kwargs
         )
@@ -264,7 +268,8 @@ class Sentinel1SarProduct(
         self,
         grouping_area_factor: tuple[float, float] = (3.0, 3.0),
     ) -> dict[str, Any]:
-        return azimuth_slant_range_grid(self.measurement.attrs, grouping_area_factor)
+        with self.measurement as measurement:
+            return azimuth_slant_range_grid(measurement.attrs, grouping_area_factor)
 
     def complex_amplitude(self) -> xr.DataArray:
         measurement = self.measurement.data_vars["measurement"]
@@ -315,15 +320,15 @@ class Sentinel1SarProduct(
             }
         )
         if self.burst_index is not None or self.burst_id is not None:
-            product_info["burst_id"] = self.measurement.attrs["burst_id"]
-            product_info["geospatial_bounds"] = self.measurement.attrs[
-                "geospatial_bounds"
-            ]
+            with self.measurement as measurement:
+                measurement_attrs = measurement.attrs
+            product_info["burst_id"] = measurement_attrs["burst_id"]
+            product_info["geospatial_bounds"] = measurement_attrs["geospatial_bounds"]
             bbox = [
-                self.measurement.attrs["geospatial_lon_min"],
-                self.measurement.attrs["geospatial_lat_min"],
-                self.measurement.attrs["geospatial_lon_max"],
-                self.measurement.attrs["geospatial_lat_max"],
+                measurement_attrs["geospatial_lon_min"],
+                measurement_attrs["geospatial_lat_min"],
+                measurement_attrs["geospatial_lon_max"],
+                measurement_attrs["geospatial_lat_max"],
             ]
             product_info["geospatial_bbox"] = bbox
 
@@ -331,13 +336,14 @@ class Sentinel1SarProduct(
 
     @functools.cache
     def stac_item(self, **kwargs: Any) -> dict[str, Any]:
-        measurement_attrs = self.measurement.attrs
-        dt = xr.open_datatree(self.product_urlpath, **self.kwargs)
-        stac_discovery: dict[str, Any] = dt.attrs["stac_discovery"]
-        if self.burst_index is not None:
-            # the datatree has a node per burst, named after the swath and the burst id
-            swath = self.measurement_group.partition("/")[0]  # type: ignore
-            burst_id = measurement_attrs.get("burst_id", self.burst_index)
-            node_name = f"{stac_discovery['id']}_{swath}_{burst_id}"
-            stac_discovery = dt[node_name].attrs["stac_discovery"]
+        with self.measurement as measurement:
+            measurement_attrs = measurement.attrs
+        with xr.open_datatree(self.product_urlpath, **self.kwargs) as dt:
+            stac_discovery: dict[str, Any] = dt.attrs["stac_discovery"]
+            if self.burst_index is not None:
+                # the datatree has a node per burst, named after the swath and the burst id
+                swath = self.measurement_group.partition("/")[0]  # type: ignore
+                burst_id = measurement_attrs.get("burst_id", self.burst_index)
+                node_name = f"{stac_discovery['id']}_{swath}_{burst_id}"
+                stac_discovery = dt[node_name].attrs["stac_discovery"]
         return stac_discovery
