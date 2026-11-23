@@ -18,11 +18,14 @@ def open_dem_raster(
     dem_urlpath: str, engine: str = "rasterio", **kwargs: Any
 ) -> xr.DataArray:
     dem_raster = xr.open_dataarray(dem_urlpath, engine=engine, **kwargs)
+    # Keep reference to close method so we can re-attach it to the return value.
+    close = dem_raster.close
     if dem_raster.y.diff("y").values[0] < 0:
         dem_raster = dem_raster.isel(y=slice(None, None, -1))
     dem_raster.attrs["long_name"] = "elevation"
     dem_raster.attrs["units"] = "m"
     dem_raster = dem_raster.rename("dem").squeeze(drop=True)
+    dem_raster.set_close(close)
     return dem_raster
 
 

@@ -278,35 +278,55 @@ def terrain_correction(
 
     logger.info(f"open DEM {dem_urlpath!r}")
 
-    dem_raster = scene.open_dem_raster(
+    with scene.open_dem_raster(
         dem_urlpath, chunks=chunks, **open_dem_raster_kwargs
-    )
-    if dem_raster_sel:
-        dem_raster = dem_raster.sel(dem_raster_sel)
+    ) as dem_raster:
+        if dem_raster_sel:
+            dem_raster = dem_raster.sel(dem_raster_sel)
 
-    persist_simulation = False
-    if simulated_urlpath is not None:
-        persist_simulation = True
+        persist_simulation = False
+        if simulated_urlpath is not None:
+            persist_simulation = True
 
-    geocoded, simulated_beta_nought = do_terrain_correction(
-        product=product,
-        dem_raster=dem_raster,
-        correct_radiometry=correct_radiometry,
-        interp_method=interp_method,
-        grouping_area_factor=grouping_area_factor,
-        radiometry_chunks=radiometry_chunks,
-        radiometry_bound=radiometry_bound,
-        seed_step=seed_step,
-        convert_to_dem_ecef_kwargs=convert_to_dem_ecef_kwargs,
-        persist_simulation=persist_simulation,
-    )
+        geocoded, simulated_beta_nought = do_terrain_correction(
+            product=product,
+            dem_raster=dem_raster,
+            correct_radiometry=correct_radiometry,
+            interp_method=interp_method,
+            grouping_area_factor=grouping_area_factor,
+            radiometry_chunks=radiometry_chunks,
+            radiometry_bound=radiometry_bound,
+            seed_step=seed_step,
+            convert_to_dem_ecef_kwargs=convert_to_dem_ecef_kwargs,
+            persist_simulation=persist_simulation,
+        )
 
-    if simulated_urlpath is not None:
-        assert simulated_beta_nought is not None
-        logger.info("save simulated")
+        if simulated_urlpath is not None:
+            assert simulated_beta_nought is not None
+            logger.info("save simulated")
 
-        maybe_delayed = simulated_beta_nought.rio.to_raster(
-            simulated_urlpath,
+            maybe_delayed = simulated_beta_nought.rio.to_raster(
+                simulated_urlpath,
+                dtype=np.float32,
+                tiled=True,
+                blockxsize=output_chunks,
+                blockysize=output_chunks,
+                compress="ZSTD",
+                num_threads="ALL_CPUS",
+                **(to_raster_kwargs or {}),
+            )
+
+            if enable_dask_distributed:
+                maybe_delayed.compute()
+
+        if output_urlpath is None:
+            assert simulated_beta_nought is not None
+            return simulated_beta_nought
+
+        logger.info("save output")
+
+        maybe_delayed = geocoded.rio.to_raster(
+            output_urlpath,
             dtype=np.float32,
             tiled=True,
             blockxsize=output_chunks,
@@ -318,25 +338,5 @@ def terrain_correction(
 
         if enable_dask_distributed:
             maybe_delayed.compute()
-
-    if output_urlpath is None:
-        assert simulated_beta_nought is not None
-        return simulated_beta_nought
-
-    logger.info("save output")
-
-    maybe_delayed = geocoded.rio.to_raster(
-        output_urlpath,
-        dtype=np.float32,
-        tiled=True,
-        blockxsize=output_chunks,
-        blockysize=output_chunks,
-        compress="ZSTD",
-        num_threads="ALL_CPUS",
-        **(to_raster_kwargs or {}),
-    )
-
-    if enable_dask_distributed:
-        maybe_delayed.compute()
 
     return geocoded
