@@ -87,7 +87,7 @@ def geocode_grd_chunk(
             azimuth_time=acquisition.azimuth_time, ground_range=ground_range, **kwargs
         ).drop_vars(["azimuth_time", "ground_range"])
 
-        with dask.config.set({"scheduler": "threads"} | dask_config):
+        with dask.config.set({"scheduler": "synchronous"} | dask_config):
             geocoded = geocoded.compute()
     else:
         # This ensures map_blocks auto-detect the template
