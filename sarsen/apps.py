@@ -323,7 +323,6 @@ def terrain_correction(
                 tiled=True,
                 blockxsize=output_chunks,
                 blockysize=output_chunks,
-                compress="ZSTD",
                 num_threads="ALL_CPUS",
                 **(to_raster_kwargs or {}),
             )
@@ -344,7 +343,6 @@ def terrain_correction(
                 tiled=True,
                 blockxsize=output_chunks,
                 blockysize=output_chunks,
-                compress="ZSTD",
                 num_threads="ALL_CPUS",
                 **(to_raster_kwargs or {}),
             )
