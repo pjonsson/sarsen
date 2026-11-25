@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Container
+from collections.abc import Container, Sequence
 from typing import Any
 from unittest import mock
 
@@ -122,7 +122,7 @@ def map_simulate_acquisition(
 
 
 def do_terrain_correction(
-    product: datamodel.SarProduct,
+    product: datamodel.SarProduct | Sequence[datamodel.SarProduct],
     dem_raster: xr.DataArray,
     convert_to_dem_ecef_kwargs: dict[str, Any] = {},
     correct_radiometry: str | None = None,
@@ -132,7 +132,9 @@ def do_terrain_correction(
     radiometry_bound: int = 128,
     seed_step: tuple[int, int] | None = None,
     persist_simulation: bool = False,
-) -> tuple[xr.DataArray, xr.DataArray | None]:
+) -> tuple[xr.DataArray | list[xr.DataArray], xr.DataArray | None]:
+    products = [product] if isinstance(product, datamodel.SarProduct) else product
+
     logger.info("pre-process DEM")
 
     dem_ecef = xr.map_blocks(
@@ -143,7 +145,7 @@ def do_terrain_correction(
 
     template_raster = dem_ecef.isel(axis=0).drop_vars(["axis", "spatial_ref"]) * 0.0
 
-    orbit_interpolator = product.orbit_interpolator()
+    orbit_interpolator = products[0].orbit_interpolator()
 
     acquisition = map_simulate_acquisition(
         dem_ecef,
@@ -156,7 +158,7 @@ def do_terrain_correction(
     if correct_radiometry is not None:
         logger.info("simulate radiometry")
 
-        grid_parameters = product.grid_parameters(grouping_area_factor)
+        grid_parameters = products[0].grid_parameters(grouping_area_factor)
 
         if correct_radiometry == "gamma_bilinear":
             gamma_weights = radiometry.gamma_weights_bilinear
@@ -181,42 +183,47 @@ def do_terrain_correction(
 
     logger.info("terrain-correct image")
 
-    if product.product_type == "GRD":
-        # optimized GRD processing
-        geocoded = xr.map_blocks(
-            geocode_grd_chunk,
-            acquisition,
-            kwargs={"product": product, "method": interp_method},
-        )
-    else:
-        beta_nought = product.beta_nought()
-
-        # HACK: we monkey-patch away an optimisation in xr.DataArray.interp that actually makes
-        #   the interpolation much slower when indeces are dask arrays.
-        with mock.patch("xarray.core.missing._localize", lambda o, i: (o, i)):
-            geocoded = product.interp_sar(
-                beta_nought,
-                azimuth_time=acquisition.azimuth_time,
-                slant_range_time=acquisition.slant_range_time,
-                method=interp_method,
+    all_geocoded = []
+    for one_product in products:
+        if one_product.product_type == "GRD":
+            # optimized GRD processing
+            geocoded = xr.map_blocks(
+                geocode_grd_chunk,
+                acquisition,
+                kwargs={"product": one_product, "method": interp_method},
             )
+        else:
+            beta_nought = one_product.beta_nought()
 
-    if correct_radiometry is not None:
-        assert simulated_beta_nought is not None
-        geocoded = geocoded / simulated_beta_nought.where(simulated_beta_nought > 0)
-        geocoded.attrs["long_name"] = "terrain-corrected gamma nought"
+            # HACK: we monkey-patch away an optimisation in xr.DataArray.interp that actually makes
+            #   the interpolation much slower when indeces are dask arrays.
+            with mock.patch("xarray.core.missing._localize", lambda o, i: (o, i)):
+                geocoded = one_product.interp_sar(
+                    beta_nought,
+                    azimuth_time=acquisition.azimuth_time,
+                    slant_range_time=acquisition.slant_range_time,
+                    method=interp_method,
+                )
 
-    geocoded.x.attrs.update(dem_ecef.x.attrs)
-    geocoded.y.attrs.update(dem_ecef.y.attrs)
-    geocoded.rio.write_crs(dem_ecef.rio.crs, inplace=True)
+        if correct_radiometry is not None:
+            assert simulated_beta_nought is not None
+            geocoded = geocoded / simulated_beta_nought.where(simulated_beta_nought > 0)
+            geocoded.attrs["long_name"] = "terrain-corrected gamma nought"
 
-    return geocoded, simulated_beta_nought
+        geocoded.x.attrs.update(dem_ecef.x.attrs)
+        geocoded.y.attrs.update(dem_ecef.y.attrs)
+        geocoded.rio.write_crs(dem_ecef.rio.crs, inplace=True)
+        all_geocoded.append(geocoded)
+
+    if isinstance(product, datamodel.SarProduct):
+        return all_geocoded[0], simulated_beta_nought
+    return all_geocoded, simulated_beta_nought
 
 
 def terrain_correction(
-    product: datamodel.SarProduct,
+    product: datamodel.SarProduct | Sequence[datamodel.SarProduct],
     dem_urlpath: str,
-    output_urlpath: str | None = "GTC.tif",
+    output_urlpath: str | Sequence[str] | None = "GTC.tif",
     simulated_urlpath: str | None = None,
     correct_radiometry: str | None = None,
     interp_method: xr.core.types.InterpOptions = "nearest",
@@ -231,12 +238,15 @@ def terrain_correction(
     seed_step: tuple[int, int] | None = None,
     convert_to_dem_ecef_kwargs: dict[str, Any] = {},
     to_raster_kwargs: dict[str, Any] | None = None,
-) -> xr.DataArray:
+) -> xr.DataArray | list[xr.DataArray]:
     """Apply the terrain-correction to sentinel-1 SLC and GRD products.
 
-    :param product: SarProduct instance representing the input data
+    :param product: SarProduct instance representing the input data, or a sequence of them
+    that share the acquisition geometry, like the polarisations of one acquisition.
+    The geometry is taken from the first one, and with `enable_dask_distributed` it is
+    computed once for all of them
     :param dem_urlpath: dem path or url
-    :param output_urlpath: output path or url
+    :param output_urlpath: output path or url, one per product
     :param correct_radiometry: default `None`. If `correct_radiometry=None`the radiometric terrain
     correction is not applied. `correct_radiometry=gamma_bilinear` applies the gamma flattening classic
     algorithm using bilinear interpolation to compute the weights. `correct_radiometry=gamma_nearest`
@@ -269,10 +279,12 @@ def terrain_correction(
         raise ValueError("No output selected")
 
     allowed_product_types = ["GRD", "SLC"]
-    if product.product_type not in allowed_product_types:
-        raise ValueError(
-            f"{product.product_type=}. Must be one of: {allowed_product_types}"
-        )
+    products = [product] if isinstance(product, datamodel.SarProduct) else product
+    for one_product in products:
+        if one_product.product_type not in allowed_product_types:
+            raise ValueError(
+                f"{one_product.product_type=}. Must be one of: {allowed_product_types}"
+            )
 
     output_chunks = chunks if chunks is not None else 512
 
@@ -325,18 +337,25 @@ def terrain_correction(
 
         logger.info("save output")
 
-        maybe_delayed = geocoded.rio.to_raster(
-            output_urlpath,
-            dtype=np.float32,
-            tiled=True,
-            blockxsize=output_chunks,
-            blockysize=output_chunks,
-            compress="ZSTD",
-            num_threads="ALL_CPUS",
-            **(to_raster_kwargs or {}),
-        )
+        maybe_delayed = [
+            one_geocoded.rio.to_raster(
+                one_output_urlpath,
+                dtype=np.float32,
+                tiled=True,
+                blockxsize=output_chunks,
+                blockysize=output_chunks,
+                compress="ZSTD",
+                num_threads="ALL_CPUS",
+                **(to_raster_kwargs or {}),
+            )
+            for one_geocoded, one_output_urlpath in zip(
+                [geocoded] if isinstance(geocoded, xr.DataArray) else geocoded,
+                [output_urlpath] if isinstance(output_urlpath, str) else output_urlpath,
+                strict=True,
+            )
+        ]
 
         if enable_dask_distributed:
-            maybe_delayed.compute()
+            dask.compute(*maybe_delayed)
 
     return geocoded
