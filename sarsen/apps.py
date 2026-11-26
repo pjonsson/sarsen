@@ -69,6 +69,21 @@ def simulate_acquisition(
     return acquisition
 
 
+def ground_range_chunk(
+    acquisition: xr.Dataset, product: datamodel.GroundRangeSarProduct
+) -> xr.DataArray:
+    if acquisition.slant_range_time.size > 0:
+        ground_range = product.slant_range_time_to_ground_range(
+            acquisition.azimuth_time,
+            acquisition.slant_range_time,
+        ).reset_coords(drop=True)
+    else:
+        # This ensures map_blocks auto-detect the template
+        ground_range = acquisition.slant_range_time
+
+    return ground_range.rename("ground_range")
+
+
 def geocode_grd_chunk(
     acquisition: xr.Dataset,
     product: datamodel.GroundRangeSarProduct,
@@ -78,13 +93,10 @@ def geocode_grd_chunk(
     beta_nought = product.beta_nought()
 
     if acquisition.slant_range_time.size > 0:
-        ground_range = product.slant_range_time_to_ground_range(
-            acquisition.azimuth_time,
-            acquisition.slant_range_time,
-        )
-
         geocoded = beta_nought.interp(
-            azimuth_time=acquisition.azimuth_time, ground_range=ground_range, **kwargs
+            azimuth_time=acquisition.azimuth_time,
+            ground_range=acquisition.ground_range,
+            **kwargs,
         ).drop_vars(["azimuth_time", "ground_range"])
 
         with dask.config.set({"scheduler": "synchronous"} | dask_config):
@@ -184,12 +196,18 @@ def do_terrain_correction(
     logger.info("terrain-correct image")
 
     all_geocoded = []
+    ground_range = None
     for one_product in products:
         if one_product.product_type == "GRD":
             # optimized GRD processing
+            if ground_range is None:
+                # the products share the geometry
+                ground_range = xr.map_blocks(
+                    ground_range_chunk, acquisition, kwargs={"product": one_product}
+                )
             geocoded = xr.map_blocks(
                 geocode_grd_chunk,
-                acquisition,
+                acquisition.assign(ground_range=ground_range),
                 kwargs={"product": one_product, "method": interp_method},
             )
         else:
