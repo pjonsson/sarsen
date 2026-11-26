@@ -1,12 +1,9 @@
-import logging
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
+import pyproj
 import xarray as xr
-from rasterio import warp
-
-LOGGER = logging.getLogger(__name__)
 
 # Earth-Centered, Earth-Fixed Coordinate Reference System used to express satellite orbit
 # https://en.wikipedia.org/wiki/Earth-centered,_Earth-fixed_coordinate_system
@@ -59,29 +56,17 @@ def transform_dem_3d(
 ) -> xr.DataArray:
     if source_crs is None:
         source_crs = dem_3d.rio.crs
-    try:
-        x, y, z = warp.transform(
-            source_crs,
-            target_crs,
-            dem_3d.sel({dim: 0}).values.flat,
-            dem_3d.sel({dim: 1}).values.flat,
-            dem_3d.sel({dim: 2}).values.flat,
-        )
-    except Exception:
-        # HACK: the very first call to warp.transform sometimes fails
-        LOGGER.warning("rasterio.warp.transform failed, retrying...")
-        x, y, z = warp.transform(
-            source_crs,
-            target_crs,
-            dem_3d.sel({dim: 0}).values.flat,
-            dem_3d.sel({dim: 1}).values.flat,
-            dem_3d.sel({dim: 2}).values.flat,
-        )
+    # x, y order like rasterio.warp.transform, which is much slower on arrays
+    transformer = pyproj.Transformer.from_crs(source_crs, target_crs, always_xy=True)
+    x, y, z = transformer.transform(
+        dem_3d.sel({dim: 0}).values,
+        dem_3d.sel({dim: 1}).values,
+        dem_3d.sel({dim: 2}).values,
+    )
     dem_3d_crs: xr.DataArray = xr.zeros_like(dem_3d)
-    shape = dem_3d_crs.loc[{dim: 0}].shape
-    dem_3d_crs.loc[{dim: 0}] = np.reshape(x, shape)
-    dem_3d_crs.loc[{dim: 1}] = np.reshape(y, shape)
-    dem_3d_crs.loc[{dim: 2}] = np.reshape(z, shape)
+    dem_3d_crs.loc[{dim: 0}] = x
+    dem_3d_crs.loc[{dim: 1}] = y
+    dem_3d_crs.loc[{dim: 2}] = z
     return dem_3d_crs
 
 
