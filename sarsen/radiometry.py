@@ -1,5 +1,4 @@
 import logging
-from unittest import mock
 
 import flox.xarray
 import numpy as np
@@ -38,14 +37,9 @@ def sum_weights(
             min_periods=multilook[0] * multilook[1] // 2 + 1,
         ).mean()
 
-    with mock.patch("xarray.core.missing._localize", lambda o, i: (o, i)):
-        weights_sum = flat_sum.interp(
-            slant_range_index=slant_range_index,
-            azimuth_index=azimuth_index,
-            method="nearest",
-        )
-
-    return weights_sum
+    return flat_sum.sel(
+        slant_range_index=slant_range_index, azimuth_index=azimuth_index
+    )
 
 
 def compute_gamma_area(
